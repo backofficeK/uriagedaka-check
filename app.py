@@ -12,8 +12,21 @@ st.set_page_config(page_title="業務自動化ツール集", layout="wide")
 st.sidebar.title("📌 機能メニュー")
 app_mode = st.sidebar.radio(
     "利用するツールを選択してください",
-    ["1. 売上明細 照合・差分抽出", "2. 基幹システムCSV ➜ freee変換"]
+    [
+        "1. 売上明細 照合・差分抽出", 
+        "2. 基幹システムCSV ➜ freee変換",
+        "3. 顧客氏名 差分抽出"
+    ]
 )
+
+# ヘルパー関数（CSV文字コード自動判別）
+def read_csv_safe(file):
+    try:
+        return pd.read_csv(file, encoding='cp932')
+    except Exception:
+        file.seek(0)
+        return pd.read_csv(file, encoding='utf-8-sig')
+
 
 # ==========================================
 # ツール1: 売上明細 照合・差分抽出システム
@@ -22,7 +35,6 @@ if app_mode == "1. 売上明細 照合・差分抽出":
     st.title("🚗 売上明細 照合・差分抽出システム")
     st.caption("`deals.csv` と `整備売上明細.csv` を照合し、不一致データを抽出します。")
 
-    # --- ルール設定 ---
     st.sidebar.header("⚙️ 照合ルール設定")
     valid_kanjo_default = "整備, 点検整備, 車検, 鈑金, レンタル売上"
     valid_kanjo_input = st.sidebar.text_input("対象とする勘定科目 (カンマ区切り)", valid_kanjo_default)
@@ -36,14 +48,6 @@ if app_mode == "1. 売上明細 照合・差分抽出":
 
     ex_seibi_kinds_input = st.sidebar.text_input("整備側で除外する種別 (カンマ区切り)", "その他, 新車待ち代車")
     ex_seibi_kinds = [x.strip() for x in ex_seibi_kinds_input.split(",") if x.strip()]
-
-    # ヘルパー関数
-    def read_csv_safe(file):
-        try:
-            return pd.read_csv(file, encoding='cp932')
-        except Exception:
-            file.seek(0)
-            return pd.read_csv(file, encoding='utf-8-sig')
 
     def clean_reg(text):
         if pd.isna(text): return ""
@@ -320,7 +324,6 @@ elif app_mode == "2. 基幹システムCSV ➜ freee変換":
 
             col_down1, col_down2 = st.columns(2)
 
-            # Excelダウンロード処理
             excel_buffer = io.BytesIO()
             with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
                 freee_df.to_excel(writer, index=False, sheet_name="freee取引")
@@ -346,7 +349,6 @@ elif app_mode == "2. 基幹システムCSV ➜ freee変換":
                     use_container_width=True
                 )
 
-            # CSVダウンロード処理
             csv = freee_df.to_csv(index=False).encode('cp932')
             with col_down2:
                 st.download_button(
@@ -359,3 +361,84 @@ elif app_mode == "2. 基幹システムCSV ➜ freee変換":
 
         except Exception as e:
             st.error(f"⚠️ 変換処理中にエラーが発生しました: {e}")
+
+# ==========================================
+# ツール3: 顧客氏名 差分抽出システム
+# ==========================================
+elif app_mode == "3. 顧客氏名 差分抽出":
+    st.title("👤 顧客氏名 差分抽出（厳密照合・表記揺れチェック）")
+    st.caption("Aファイル（freeeデータ）のA列と、Bファイル（顧客データ）のB列を文字通り厳密に比較し、表記揺れや片方にしかない氏名を抽出します。")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        file_a = st.file_uploader("1. Aファイル (freeeデータ CSV) をアップロード", type=["csv"])
+    with col2:
+        file_b = st.file_uploader("2. Bファイル (顧客 CSV) をアップロード", type=["csv"])
+
+    if file_a and file_b:
+        try:
+            df_a = read_csv_safe(file_a)
+            df_b = read_csv_safe(file_b)
+
+            if df_a.shape[1] < 1:
+                st.error("❌ Aファイルにデータが存在しないか、列が見つかりません。")
+                st.stop()
+            if df_b.shape[1] < 2:
+                st.error("❌ Bファイルには最低でも2列（B列）が必要です。")
+                st.stop()
+
+            # 元の列名を取得
+            a_col_name = df_a.columns[0]  # A列
+            b_col_name = df_b.columns[1]  # B列
+
+            # 厳密な文字照合（前後の空白除去のみ実施、全角半角や内部スペースはそのまま比較）
+            df_a['target_name'] = df_a[a_col_name].astype(str).str.strip()
+            df_b['target_name'] = df_b[b_col_name].astype(str).str.strip()
+
+            # 空白行・nanの除外
+            df_a_valid = df_a[(df_a['target_name'] != "") & (df_a['target_name'] != "nan")].copy()
+            df_b_valid = df_b[(df_b['target_name'] != "") & (df_b['target_name'] != "nan")].copy()
+
+            set_a_names = set(df_a_valid['target_name'])
+            set_b_names = set(df_b_valid['target_name'])
+
+            # 差分抽出（文字が完全一致しないものを抽出）
+            a_only_df = df_a_valid[~df_a_valid['target_name'].isin(set_b_names)].drop_duplicates(subset=['target_name'])
+            b_only_df = df_b_valid[~df_b_valid['target_name'].isin(set_a_names)].drop_duplicates(subset=['target_name'])
+
+            # 出力用データフレーム
+            out_a = pd.DataFrame({
+                '存在ファイル': 'Aファイル（freee）のみ存在',
+                '顧客氏名': a_only_df['target_name']
+            })
+
+            out_b = pd.DataFrame({
+                '存在ファイル': 'Bファイル（顧客CSV）のみ存在',
+                '顧客氏名': b_only_df['target_name']
+            })
+
+            result_df = pd.concat([out_a, out_b], ignore_index=True)
+
+            st.markdown("---")
+            st.subheader("📊 氏名照合結果サマリー")
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("不一致・表記揺れ 氏名数", f"{len(result_df)} 件")
+            m2.metric("Aファイル のみ存在", f"{len(out_a)} 件")
+            m3.metric("Bファイル のみ存在", f"{len(out_b)} 件")
+
+            if not result_df.empty:
+                st.dataframe(result_df, use_container_width=True)
+
+                csv_data = result_df.to_csv(index=False, encoding='utf-8-sig')
+                st.download_button(
+                    label="📥 不一致・表記揺れ一覧（CSV）をダウンロード",
+                    data=csv_data,
+                    file_name="顧客氏名_不一致・表記揺れ一覧.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.success("🎉 すべての顧客氏名が完全一致しました！表記揺れ・不一致はありません。")
+
+        except Exception as e:
+            st.error(f"⚠️ 処理中にエラーが発生しました: {e}")
